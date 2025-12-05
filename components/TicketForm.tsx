@@ -41,7 +41,7 @@ export default function TicketForm({ onSubmit, isLoading }: TicketFormProps) {
       </div>
       <div>
         <label htmlFor="description" className="block text-sm font-medium text-gray-300 mb-2">
-          {t('create.description')}
+          {t('create.descriptionLabel')}
         </label>
         <textarea
           id="description"
