@@ -75,6 +75,32 @@ export class AIService {
   /**
    * Генерирует ответ на вопрос пользователя с помощью ChatGPT
    */
+  /**
+   * Определяет язык текста
+   */
+  private static detectLanguage(text: string): 'ru' | 'kk' {
+    const lowerText = text.toLowerCase();
+    
+    // Казахские специфические символы и слова
+    const kazakhIndicators = [
+      'ә', 'ғ', 'қ', 'ң', 'ө', 'ұ', 'ү', 'һ', 'і',
+      'қалай', 'не', 'қайда', 'қашан', 'керек', 'болады',
+      'емес', 'жоқ', 'бар', 'біз', 'сіз', 'олар', 'мен',
+      'сен', 'біздің', 'сіздің', 'олардың'
+    ];
+    
+    const kazakhCount = kazakhIndicators.filter(indicator => 
+      lowerText.includes(indicator)
+    ).length;
+    
+    // Если найдено достаточно казахских индикаторов
+    if (kazakhCount >= 2) {
+      return 'kk';
+    }
+    
+    return 'ru';
+  }
+
   static async generateUserResponse(question: string, context?: {
     category?: string;
     type?: string;
@@ -89,6 +115,10 @@ export class AIService {
     }
 
     try {
+      // Определяем язык вопроса
+      const questionLanguage = this.detectLanguage(question);
+      const targetLanguage = questionLanguage === 'kk' ? 'казахский' : 'русский';
+      
       const contextInfo = context
         ? `\n\nКонтекст вопроса:\n- Категория: ${context.category || 'Не указана'}\n- Тип: ${context.type || 'Не указан'}\n- Отдел: ${context.department || 'Не указан'}`
         : '';
@@ -100,7 +130,7 @@ export class AIService {
 2. Если это техническая проблема - предложи конкретные шаги решения
 3. Если это вопрос о продукте/услуге - дай развернутую информацию
 4. Если не уверен в ответе - предложи связаться со специалистом
-5. Ответ должен быть на русском языке, вежливым и профессиональным
+5. ВАЖНО: Ответ должен быть на ${targetLanguage} языке (на том же языке, на котором задан вопрос), вежливым и профессиональным
 
 Сгенерируй ответ (только текст ответа, без дополнительных комментариев):`;
 
@@ -214,6 +244,10 @@ export class AIService {
   static async findAnswerInFAQ(question: string): Promise<AIResponse> {
     const faqResults = searchFAQ(question, 3);
     
+    // Определяем язык вопроса
+    const questionLanguage = this.detectLanguage(question);
+    const targetLanguage = questionLanguage === 'kk' ? 'казахский' : 'русский';
+    
     // Если есть совпадение в FAQ - используем его
     if (faqResults.length > 0) {
       const bestMatch = faqResults[0];
@@ -233,7 +267,7 @@ export class AIService {
 Найденный ответ из базы знаний: "${bestMatch.answer}"
 
 Сгенерируй дружелюбный и понятный ответ пользователю на основе найденной информации. 
-Ответ должен быть на русском языке, вежливым и полным.
+ВАЖНО: Ответ должен быть на ${targetLanguage} языке (на том же языке, на котором задан вопрос), вежливым и полным.
 
 Ответ (только текст ответа, без дополнительных комментариев):`;
 
