@@ -125,14 +125,16 @@ export class AIService {
 
       const prompt = `Ты помощник службы поддержки. Пользователь задал вопрос: "${question}"${contextInfo}
 
-Твоя задача:
-1. Дать полезный, точный и дружелюбный ответ
-2. Если это техническая проблема - предложи конкретные шаги решения
-3. Если это вопрос о продукте/услуге - дай развернутую информацию
-4. Если не уверен в ответе - предложи связаться со специалистом
-5. ВАЖНО: Ответ должен быть на ${targetLanguage} языке (на том же языке, на котором задан вопрос), вежливым и профессиональным
+КРИТИЧЕСКИ ВАЖНО:
+- Отвечай ТОЛЬКО на вопросы про техническую поддержку, IT, продажи, бухгалтерию, HR или корпоративные вопросы
+- Если вопрос философский, общий или не про работу/технику - верни ТОЛЬКО "OPERATOR_REQUIRED"
+- Отвечай ТОЛЬКО если можешь дать ТОЧНЫЙ и ПОЛНЫЙ ответ на конкретный вопрос
+- Если вопрос неясный, требует дополнительной информации или ты не уверен - верни "OPERATOR_REQUIRED"
+- Если не можешь точно ответить - верни только текст: "OPERATOR_REQUIRED"
+- Ответ должен быть на ${targetLanguage} языке (на том же языке, на котором задан вопрос)
+- Ответ должен быть вежливым, профессиональным и ПОЛНОСТЬЮ отвечать на заданный вопрос
 
-Сгенерируй ответ (только текст ответа, без дополнительных комментариев):`;
+Сгенерируй ответ (только текст ответа, без дополнительных комментариев. Если не можешь точно ответить или вопрос не по теме - верни только "OPERATOR_REQUIRED"):`;
 
       const response = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
@@ -152,7 +154,8 @@ export class AIService {
 
       const answer = response.choices[0]?.message?.content?.trim() || '';
       
-      if (!answer) {
+      // Если ИИ не может ответить - передаем оператору
+      if (!answer || answer === 'OPERATOR_REQUIRED' || answer.toLowerCase().includes('operator_required')) {
         return {
           answer: '',
           confidence: 0,
@@ -161,25 +164,31 @@ export class AIService {
       }
 
       // Определяем, является ли вопрос простым и можем ли мы уверенно ответить
-      const confidencePrompt = `Проанализируй вопрос и ответ:
+      const confidencePrompt = `Проанализируй вопрос и ответ на релевантность и точность:
 
 Вопрос: "${question}"
 Ответ: "${answer}"
 
-Оцени:
-1. Является ли вопрос простым/стандартным? (да/нет)
-2. Достаточно ли полный и точный ответ? (да/нет)
-3. Нужна ли дополнительная информация от пользователя? (да/нет)
-4. Может ли этот вопрос быть закрыт автоматически? (да/нет)
+КРИТИЧЕСКИ ВАЖНО - оцени строго:
+1. Отвечает ли ответ НАПРЯМУЮ на заданный вопрос? (да/нет)
+2. Является ли ответ ТОЧНЫМ и ПОЛНЫМ? (да/нет)
+3. Является ли вопрос простым/стандартным, на который можно дать точный ответ? (да/нет)
+4. Нужна ли дополнительная информация от пользователя для ответа? (да/нет)
+5. Может ли этот вопрос быть закрыт автоматически БЕЗ участия оператора? (да/нет)
+6. Релевантен ли ответ теме вопроса? (да/нет)
 
 Ответь в формате JSON:
 {
+  "isRelevant": true/false,
+  "isAccurate": true/false,
   "isSimple": true/false,
   "isComplete": true/false,
   "needsMoreInfo": true/false,
   "canAutoClose": true/false,
   "confidence": 0.0-1.0
-}`;
+}
+
+ВАЖНО: Если ответ не релевантен, неточен или неполон - установи canAutoClose в false и confidence < 0.7`;
 
       try {
         const confidenceResponse = await openai.chat.completions.create({
@@ -200,32 +209,65 @@ export class AIService {
         });
 
         const confidenceData = JSON.parse(confidenceResponse.choices[0]?.message?.content || '{}');
-        const confidence = confidenceData.confidence || 
-          (confidenceData.canAutoClose && confidenceData.isComplete && !confidenceData.needsMoreInfo ? 0.8 : 0.6);
+        
+        // Строгая проверка: отвечаем только если ответ релевантен, точен и полон
+        const isRelevant = confidenceData.isRelevant !== false;
+        const isAccurate = confidenceData.isAccurate !== false;
+        const isComplete = confidenceData.isComplete !== false;
+        const canAutoClose = confidenceData.canAutoClose === true;
+        const needsMoreInfo = confidenceData.needsMoreInfo === true;
+        
+        // Вычисляем уверенность на основе всех факторов
+        let confidence = confidenceData.confidence || 0.5;
+        
+        // Снижаем уверенность если ответ не релевантен или неточен
+        if (!isRelevant || !isAccurate) {
+          confidence = Math.min(confidence, 0.5);
+        }
+        
+        // Повышаем уверенность только если все критерии выполнены
+        if (isRelevant && isAccurate && isComplete && !needsMoreInfo && canAutoClose) {
+          confidence = Math.max(confidence, 0.8);
+        } else {
+          // Если хоть один критерий не выполнен - снижаем уверенность
+          confidence = Math.min(confidence, 0.6);
+        }
+
+        // Отвечаем автоматически только если уверенность > 0.8 И все критерии выполнены
+        const shouldAutoClose = confidence > 0.8 && 
+                                isRelevant && 
+                                isAccurate && 
+                                isComplete && 
+                                !needsMoreInfo && 
+                                canAutoClose;
 
         return {
           answer,
           confidence: Math.min(confidence, 0.95), // Ограничиваем максимум
-          shouldCloseTicket: confidence > 0.7 && confidenceData.canAutoClose !== false
+          shouldCloseTicket: shouldAutoClose
         };
       } catch (error) {
         console.error('Confidence evaluation error:', error);
-        // Fallback: простая эвристика
+        // Fallback: строгая эвристика - не отвечаем автоматически если не уверены
+        const hasUncertainty = answer.toLowerCase().includes('не уверен') ||
+                              answer.toLowerCase().includes('обратитесь') ||
+                              answer.toLowerCase().includes('специалист') ||
+                              answer.toLowerCase().includes('уточните') ||
+                              answer.toLowerCase().includes('дополнительная информация');
+        
         const isSimpleQuestion = question.length < 200 && 
           !question.toLowerCase().includes('срочно') &&
           !question.toLowerCase().includes('критично') &&
-          !question.toLowerCase().includes('не работает') &&
           answer.length > 50 &&
-          !answer.toLowerCase().includes('не уверен') &&
-          !answer.toLowerCase().includes('обратитесь') &&
-          !answer.toLowerCase().includes('специалист');
+          !hasUncertainty;
 
-        const confidence = isSimpleQuestion ? 0.75 : 0.6;
+        // В fallback режиме не отвечаем автоматически - передаем оператору
+        const confidence = isSimpleQuestion ? 0.65 : 0.4;
 
         return {
           answer,
           confidence,
-          shouldCloseTicket: confidence > 0.7 && isSimpleQuestion
+          shouldCloseTicket: false // В fallback всегда передаем оператору
         };
       }
     } catch (error) {
@@ -262,14 +304,55 @@ export class AIService {
       }
 
       try {
+        // Сначала проверяем релевантность через ИИ
+        const relevanceCheck = `Вопрос пользователя: "${question}"
+Вопрос из базы знаний: "${bestMatch.question}"
+
+Оцени, насколько эти вопросы связаны между собой. Ответь ТОЛЬКО "ДА" если вопросы связаны и найденный ответ можно использовать, или "НЕТ" если вопросы не связаны.
+
+Ответ (только "ДА" или "НЕТ"):`;
+
+        const relevanceResponse = await openai.chat.completions.create({
+          model: 'gpt-4o-mini',
+          messages: [
+            {
+              role: 'system',
+              content: 'Ты проверяешь релевантность вопросов. Отвечай только "ДА" или "НЕТ".'
+            },
+            {
+              role: 'user',
+              content: relevanceCheck
+            }
+          ],
+          temperature: 0.1,
+          max_tokens: 10
+        });
+
+        const isRelevant = relevanceResponse.choices[0]?.message?.content?.trim().toUpperCase().includes('ДА');
+        
+        // Если не релевантно - передаем оператору
+        if (!isRelevant) {
+          console.log('FAQ not relevant to question:', { question, faqQuestion: bestMatch.question });
+          return {
+            answer: '',
+            confidence: 0,
+            shouldCloseTicket: false
+          };
+        }
+
         const prompt = `Пользователь задал вопрос: "${question}"
 
 Найденный ответ из базы знаний: "${bestMatch.answer}"
 
-Сгенерируй дружелюбный и понятный ответ пользователю на основе найденной информации. 
-ВАЖНО: Ответ должен быть на ${targetLanguage} языке (на том же языке, на котором задан вопрос), вежливым и полным.
+КРИТИЧЕСКИ ВАЖНО:
+- Используй ТОЛЬКО информацию из найденного ответа
+- Ответ должен ТОЧНО отвечать на заданный вопрос
+- Если найденный ответ НЕ ОТВЕЧАЕТ на заданный вопрос - верни ТОЛЬКО "OPERATOR_REQUIRED"
+- Если вопрос не про техническую поддержку, IT, продажи, бухгалтерию или HR - верни "OPERATOR_REQUIRED"
+- Ответ должен быть на ${targetLanguage} языке (на том же языке, на котором задан вопрос)
+- Ответ должен быть вежливым, профессиональным и ПОЛНОСТЬЮ отвечать на вопрос
 
-Ответ (только текст ответа, без дополнительных комментариев):`;
+Ответ (только текст ответа, без дополнительных комментариев. Если не можешь точно ответить - верни только "OPERATOR_REQUIRED"):`;
 
         const response = await openai.chat.completions.create({
           model: 'gpt-4o-mini',
@@ -288,13 +371,32 @@ export class AIService {
         });
 
         const answer = response.choices[0]?.message?.content || bestMatch.answer;
+        
+        // Если ИИ не может ответить - передаем оператору
+        if (answer.trim() === 'OPERATOR_REQUIRED' || answer.toLowerCase().includes('operator_required')) {
+          return {
+            answer: '',
+            confidence: 0,
+            sourceFAQId: bestMatch.id,
+            shouldCloseTicket: false
+          };
+        }
+        
+        // Для FAQ ответов уверенность выше, но все равно проверяем релевантность
         const confidence = 0.85;
+        
+        // Проверяем, что ответ релевантен вопросу
+        const answerLower = answer.toLowerCase();
+        const questionLower = question.toLowerCase();
+        const answerIsRelevant = answerLower.length > 30 && 
+                          (answerLower.includes(questionLower.split(' ')[0]) || 
+                           questionLower.split(' ').some(word => word.length > 3 && answerLower.includes(word)));
 
         return {
           answer: answer.trim(),
-          confidence,
+          confidence: answerIsRelevant ? confidence : 0.6,
           sourceFAQId: bestMatch.id,
-          shouldCloseTicket: confidence > 0.8
+          shouldCloseTicket: answerIsRelevant && confidence > 0.8
         };
       } catch (error) {
         console.error('AI FAQ error:', error);

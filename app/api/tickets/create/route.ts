@@ -22,7 +22,7 @@ export async function POST(request: NextRequest) {
     const faqResponse = await AIService.findAnswerInFAQ(description);
     
     // Если FAQ не дал ответ, но есть API ключ - генерируем ответ через ChatGPT
-    // Это работает для всех вопросов, включая простые
+    // ИИ отвечает ТОЛЬКО если может дать точный ответ (confidence > 0.8)
     if (!faqResponse.answer && process.env.OPENAI_API_KEY) {
       const aiResponse = await AIService.generateUserResponse(description, {
         category: analysis.category,
@@ -30,12 +30,17 @@ export async function POST(request: NextRequest) {
         department: analysis.departmentName
       });
       
-      // Используем сгенерированный ответ если он есть
-      // Для простых вопросов (confidence > 0.7) ответ будет автоматически добавлен
-      if (aiResponse.answer) {
+      // Используем сгенерированный ответ ТОЛЬКО если уверенность высокая (> 0.8)
+      // Это гарантирует, что ИИ отвечает только на вопросы, на которые может дать точный ответ
+      if (aiResponse.answer && aiResponse.confidence > 0.8 && aiResponse.shouldCloseTicket) {
         faqResponse.answer = aiResponse.answer;
         faqResponse.confidence = aiResponse.confidence;
         faqResponse.shouldCloseTicket = aiResponse.shouldCloseTicket;
+      } else {
+        // Если уверенность низкая - не отвечаем автоматически, передаем оператору
+        faqResponse.answer = '';
+        faqResponse.confidence = 0;
+        faqResponse.shouldCloseTicket = false;
       }
     }
     
@@ -44,7 +49,8 @@ export async function POST(request: NextRequest) {
       hasAnswer: !!faqResponse.answer,
       confidence: faqResponse.confidence,
       shouldClose: faqResponse.shouldCloseTicket,
-      questionLength: description.length
+      questionLength: description.length,
+      willAutoRespond: faqResponse.shouldCloseTicket && faqResponse.confidence > 0.8
     });
 
     // 3. Создание тикета

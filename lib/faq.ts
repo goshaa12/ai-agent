@@ -249,31 +249,81 @@ export function searchFAQ(query: string, limit: number = 5): FAQ[] {
   const lowerQuery = query.toLowerCase();
   const detectedLang = detectLanguage(query);
   
+  // Исключаем философские и общие вопросы, которые не относятся к поддержке
+  const excludedTopics = [
+    'смысл жизни', 'в чем смысл', 'зачем жить', 'философия',
+    'что такое жизнь', 'что такое любовь', 'что такое счастье',
+    'өмірдің мағынасы', 'не үшін', 'философия', 'зачем',
+    'почему', 'неге', 'не себепті', 'что есть', 'что такое'
+  ];
+  
+  const isExcluded = excludedTopics.some(topic => lowerQuery.includes(topic));
+  if (isExcluded) {
+    return []; // Не ищем FAQ для таких вопросов
+  }
+  
+  // Извлекаем ключевые слова из вопроса
+  const questionWords = lowerQuery.split(/\s+/).filter(w => w.length > 3);
+  
   const scored = faqDatabase.map(faq => {
     // Приоритет для FAQ на том же языке
     let score = faq.language === detectedLang ? 3 : 0;
     
     const questionLower = faq.question.toLowerCase();
     const answerLower = faq.answer.toLowerCase();
+    const faqQuestionWords = questionLower.split(/\s+/).filter(w => w.length > 3);
     
-    // Exact match in question
-    if (questionLower.includes(lowerQuery)) score += 10;
+    // Проверяем совпадение ключевых слов между вопросом и FAQ
+    const commonWords = questionWords.filter(w => faqQuestionWords.includes(w));
+    if (commonWords.length === 0) {
+      // Если нет общих слов - проверяем ключевые слова FAQ
+      let hasKeywordMatch = false;
+      faq.keywords.forEach(keyword => {
+        const keywordLower = keyword.toLowerCase();
+        if (lowerQuery.includes(keywordLower) && keywordLower.length > 3) {
+          hasKeywordMatch = true;
+        }
+      });
+      if (!hasKeywordMatch) {
+        return { faq, score: 0 }; // Нет связи - не релевантно
+      }
+    }
     
-    // Keyword matches
+    // Exact match in question - самый высокий приоритет
+    if (questionLower.includes(lowerQuery) || lowerQuery.includes(questionLower.split(' ')[0])) {
+      score += 20;
+    }
+    
+    // Совпадение общих слов
+    if (commonWords.length > 0) {
+      score += commonWords.length * 5;
+    }
+    
+    // Keyword matches - только если есть реальное совпадение
+    let keywordMatches = 0;
     faq.keywords.forEach(keyword => {
-      if (lowerQuery.includes(keyword.toLowerCase()) || keyword.toLowerCase().includes(lowerQuery)) {
+      const keywordLower = keyword.toLowerCase();
+      // Проверяем, что ключевое слово действительно связано с вопросом
+      if (lowerQuery.includes(keywordLower) && keywordLower.length > 3) {
+        keywordMatches++;
         score += 5;
       }
     });
     
-    // Answer contains query
+    // Если нет совпадений ключевых слов И нет общих слов - не релевантно
+    if (keywordMatches === 0 && commonWords.length === 0 && score < 10) {
+      score = 0; // Не релевантно
+    }
+    
+    // Answer contains query - низкий приоритет
     if (answerLower.includes(lowerQuery)) score += 2;
     
     return { faq, score };
   });
   
+  // Фильтруем только релевантные (score >= 8) - повысили порог
   return scored
-    .filter(item => item.score > 0)
+    .filter(item => item.score >= 8) // Повышенный порог релевантности
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map(item => item.faq);
